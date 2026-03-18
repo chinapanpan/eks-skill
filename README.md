@@ -8,7 +8,7 @@ A Claude Code skill and guides for deploying production-ready EKS clusters with 
 eks-skill/
 ├── eks-karpenter-agent-sandbox.md   # Claude Code Skill (main deployment script)
 ├── docs/
-│   ├── guide-skill-installation.md  # Skill Installation & Usage Guide
+│   ├── setup_guide.md  # Skill Installation & Usage Guide
 │   └── guide-agent-sandbox-usage.md # Agent Sandbox Usage Guide (post-install)
 ├── tests/
 │   └── test-all.sh                  # Validation test suite (15 tests)
@@ -34,11 +34,11 @@ eks-skill/
 
 1. Install the skill: copy `eks-karpenter-agent-sandbox.md` to `~/.claude/skills/`
 2. In Claude Code, ask: *"Deploy an EKS cluster with Karpenter and Agent Sandbox in us-west-2"*
-3. Follow the skill steps or see `docs/guide-skill-installation.md` for detailed walkthrough
+3. Follow the skill steps or see `docs/setup_guide.md` for detailed walkthrough
 
 ## Guides
 
-- **[Skill Installation Guide](docs/guide-skill-installation.md)**: Prerequisites, parameters, step-by-step deployment, troubleshooting, cleanup, and cost estimates.
+- **[Skill Installation Guide](docs/setup_guide.md)**: Prerequisites, parameters, step-by-step deployment, troubleshooting, cleanup, and cost estimates.
 - **[Agent Sandbox Usage Guide](docs/guide-agent-sandbox-usage.md)**: Concepts, SandboxTemplate/WarmPool/Claim usage, monitoring, advanced use cases (custom images, multiple pools, burst scaling, Python SDK), and full API reference.
 
 ## Test Suite
