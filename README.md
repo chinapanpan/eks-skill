@@ -1,17 +1,15 @@
-# EKS + Karpenter + Agent Sandbox Skill
+# EKS + Karpenter + Agent Sandbox
 
-A Claude Code skill and guides for deploying production-ready EKS clusters with single-EC2-per-Pod isolation using Karpenter and Agent Sandbox warm pools.
+Deploy production-ready EKS clusters with single-EC2-per-Pod isolation using Karpenter and Agent Sandbox warm pools.
 
 ## Repository Structure
 
 ```
 eks-skill/
-├── eks-karpenter-agent-sandbox.md   # Claude Code Skill (main deployment script)
-├── docs/
-│   ├── setup_guide.md  # Skill Installation & Usage Guide
-│   └── guide-agent-sandbox-usage.md # Agent Sandbox Usage Guide (post-install)
+├── setup_guide.md           # Step-by-step deployment guide (11 steps)
+├── sandbox_usage_guide.md   # Agent Sandbox usage guide (post-install)
 ├── tests/
-│   └── test-all.sh                  # Validation test suite (15 tests)
+│   └── test-all.sh          # Validation test suite (15 tests)
 └── README.md
 ```
 
@@ -23,6 +21,15 @@ eks-skill/
 - **EBS CSI Driver** + **ALB Controller** as add-ons
 - Worker nodes in **private subnets only**
 
+## Instance Type Profiles
+
+| Profile | INSTANCE_TYPE | vCPU / RAM | SandboxTemplate Resources | Use Case |
+|---------|---------------|------------|---------------------------|----------|
+| **Standard** | `m5.xlarge` | 4 vCPU / 16GB | cpu: 3500m, mem: 12Gi | Production workloads |
+| **Low-spec** | `t3.medium` | 2 vCPU / 4GB | cpu: 1, mem: 2Gi | Dev/test, cost-sensitive |
+
+Both profiles verified: pods run successfully with 1 pod per dedicated node.
+
 ## Key Features
 
 - **Region-portable**: Works in any AWS commercial region (auto-detects AZs)
@@ -32,19 +39,23 @@ eks-skill/
 
 ## Quick Start
 
-1. Install the skill: copy `eks-karpenter-agent-sandbox.md` to `~/.claude/skills/`
-2. In Claude Code, ask: *"Deploy an EKS cluster with Karpenter and Agent Sandbox in us-west-2"*
-3. Follow the skill steps or see `docs/setup_guide.md` for detailed walkthrough
+1. Follow **[setup_guide.md](setup_guide.md)** for the full 11-step deployment
+2. Set your parameters:
+   ```bash
+   export AWS_DEFAULT_REGION="us-west-2"
+   export CLUSTER_NAME="my-agent-cluster"
+   export INSTANCE_TYPE="m5.xlarge"    # or t3.medium for low-cost
+   ```
+3. After deployment, see **[sandbox_usage_guide.md](sandbox_usage_guide.md)** for sandbox operations
 
 ## Guides
 
-- **[Skill Installation Guide](docs/setup_guide.md)**: Prerequisites, parameters, step-by-step deployment, troubleshooting, cleanup, and cost estimates.
-- **[Agent Sandbox Usage Guide](docs/guide-agent-sandbox-usage.md)**: Concepts, SandboxTemplate/WarmPool/Claim usage, monitoring, advanced use cases (custom images, multiple pools, burst scaling, Python SDK), and full API reference.
+- **[Setup Guide](setup_guide.md)**: Prerequisites, parameters, step-by-step deployment, troubleshooting, cleanup, and cost estimates.
+- **[Sandbox Usage Guide](sandbox_usage_guide.md)**: Concepts, SandboxTemplate/WarmPool/Claim usage, monitoring, advanced use cases (custom images, multiple pools, burst scaling, Python SDK), and full API reference.
 
 ## Test Suite
 
 ```bash
-# Run against your cluster
 TEST_REGION=<your-region> TEST_CLUSTER_NAME=<your-cluster> bash tests/test-all.sh
 ```
 
@@ -53,9 +64,11 @@ TEST_REGION=<your-region> TEST_CLUSTER_NAME=<your-cluster> bash tests/test-all.s
 - **ALB Controller** (4): deployment health, IngressClass, ALB provisioning, HTTP response
 - **Agent Sandbox** (6): controller health, warm pool ready, claim latency, backfill, burst claims, cleanup
 
-## Validated Regions
+## Cost Estimate
 
-| Region | Cluster Name | Result |
-|--------|-------------|--------|
-| ap-northeast-1 (Tokyo) | agent-sandbox-cluster | 15/15 passed |
-| us-west-2 (Oregon) | agent-sandbox-usw2 | 14/15 passed (ALB timing) |
+| Profile | Idle cost (2 warm pool pods) | Daily |
+|---------|------------------------------|-------|
+| Standard (m5.xlarge) | ~$0.72/hr | ~$17/day |
+| Low-spec (t3.medium) | ~$0.42/hr | ~$10/day |
+
+Scale warm pool to 0 when not in use to reduce to ~$0.34/hr.
