@@ -137,14 +137,15 @@ spec:
 
 Resource requests serve a dual purpose:
 1. **Kubernetes scheduling**: Tells the scheduler how much CPU/memory the pod needs
-2. **Isolation guarantee**: A pod requesting 3500m/12Gi on a 4 vCPU/16GB xlarge node leaves no room for a second sandbox pod
+2. **Isolation guarantee**: A pod requesting most of the node's resources (e.g., 3500m/12Gi on m5.xlarge, or 1/2Gi on t3.medium) leaves no room for a second sandbox pod
 
-If you use a smaller instance size, adjust requests proportionally:
-| Instance Size | vCPU | Memory | Recommended Request |
-|---------------|------|--------|---------------------|
-| xlarge | 4 | 16 GiB | 3500m CPU, 12Gi mem |
-| 2xlarge | 8 | 32 GiB | 7500m CPU, 28Gi mem |
-| 4xlarge | 16 | 64 GiB | 15000m CPU, 56Gi mem |
+Adjust requests to match your instance type:
+| Instance Type | vCPU | Memory | Recommended Request | Use Case |
+|---------------|------|--------|---------------------|----------|
+| t3.medium | 2 | 4 GiB | 1 CPU, 2Gi mem | Dev/test, low-cost |
+| m5.xlarge | 4 | 16 GiB | 3500m CPU, 12Gi mem | Production (default) |
+| m5.2xlarge | 8 | 32 GiB | 7500m CPU, 28Gi mem | Heavy workloads |
+| m5.4xlarge | 16 | 64 GiB | 15000m CPU, 56Gi mem | Large models |
 
 ---
 
@@ -172,7 +173,7 @@ spec:
 | Production (low traffic) | 3-5 | Buffer for burst requests |
 | Production (high traffic) | 10+ | Handle concurrent agent requests |
 
-**Cost trade-off**: Each warm pool pod runs on a dedicated xlarge node (~$0.17/hr). A pool of 5 costs ~$0.85/hr idle.
+**Cost trade-off**: Each warm pool pod runs on a dedicated node. Cost per node: t3.medium ~$0.04/hr, m5.xlarge ~$0.19/hr. A pool of 5 on m5.xlarge costs ~$0.95/hr idle; on t3.medium only ~$0.20/hr.
 
 ### Scaling the Warm Pool
 
@@ -338,9 +339,10 @@ containers:
       fieldRef:
         fieldPath: metadata.name
   resources:
-    requests:
-      cpu: "3500m"
-      memory: "12Gi"
+    # For m5.xlarge (4 vCPU / 16GB)
+    requests: { cpu: "3500m", memory: "12Gi" }
+    # For t3.medium (2 vCPU / 4GB), use:
+    # requests: { cpu: "1", memory: "2Gi" }
 ```
 
 ### Multiple Template Pools
@@ -348,7 +350,7 @@ containers:
 Run different agent types with separate templates and warm pools:
 
 ```yaml
-# Template 1: Code interpreter (lightweight)
+# Template 1: Code interpreter (low-spec, t3.medium)
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
@@ -362,9 +364,10 @@ spec:
       - name: agent
         image: python:3.12-slim
         resources:
-          requests: { cpu: "3500m", memory: "12Gi" }
+          requests: { cpu: "1", memory: "2Gi" }
+          limits: { cpu: "1", memory: "2Gi" }
 ---
-# Template 2: Browser agent (heavier)
+# Template 2: Browser agent (standard, m5.xlarge)
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
@@ -379,6 +382,7 @@ spec:
         image: my-chromium-agent:latest
         resources:
           requests: { cpu: "3500m", memory: "12Gi" }
+          limits: { cpu: "4", memory: "14Gi" }
 ---
 # Warm pools for each
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
