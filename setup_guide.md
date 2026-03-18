@@ -84,9 +84,16 @@ All parameters can be customized. Defaults are shown below.
 | `INSTANCE_TYPE` | `m5.xlarge` | Valid EC2 instance type | EC2 instance type for sandbox nodes |
 | `AVAILABILITY_ZONES` | Auto-detected | 3 AZs required | Auto-detected from region |
 
-### Important Constraints
-- **INSTANCE_TYPE**: Do NOT use `large` class instances (2 vCPU). DaemonSet overhead leaves insufficient resources. Use `xlarge` (4 vCPU, 16GB) or larger. Examples: `m5.xlarge`, `c6i.xlarge`, `r5.2xlarge`.
-- **INSTANCE_TYPE vs SandboxTemplate resources**: The SandboxTemplate in Step 11 requests `cpu: 3500m` and `memory: 12Gi`, sized for instances with 4 vCPU / 16GB (e.g., `m5.xlarge`). If you use a memory-constrained type like `c5.xlarge` (4 vCPU / 8GB), you must reduce the memory request accordingly.
+### Instance Type Profiles
+
+| Profile | INSTANCE_TYPE | vCPU / RAM | SandboxTemplate Resources | Use Case |
+|---------|---------------|------------|---------------------------|----------|
+| **Standard (default)** | `m5.xlarge` | 4 vCPU / 16GB | cpu: 3500m, mem: 12Gi | Production workloads |
+| **Low-spec** | `t3.medium` | 2 vCPU / 4GB | cpu: 1, mem: 2Gi | Dev/test, cost-sensitive |
+
+> **Important**: SandboxTemplate resource requests must fit within the instance's allocatable resources (total minus DaemonSet overhead). If requests exceed capacity, pods will stay Pending.
+
+### Other Constraints
 - **AVAILABILITY_ZONES**: Auto-detected via `aws ec2 describe-availability-zones`. Different regions have different AZ naming (e.g., Tokyo: a/c/d, Oregon: a/b/c).
 
 ---
@@ -446,6 +453,22 @@ EOF
 
 **Expected output**: SandboxTemplate and SandboxWarmPool created. Karpenter will provision nodes in ~90s.
 
+#### Low-spec alternative (t3.medium)
+
+If using `INSTANCE_TYPE="t3.medium"`, replace the container resources in SandboxTemplate above:
+
+```yaml
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+```
+
+Verified: t3.medium (2 vCPU / 4GB) with 1 vCPU / 2Gi requests runs successfully, with each pod on a dedicated node.
+
 ---
 
 ## Verification Checklist
@@ -577,10 +600,13 @@ eksctl delete cluster --name ${CLUSTER_NAME} --region ${AWS_DEFAULT_REGION}
 |-----------|----------|-----------------|
 | EKS Control Plane | - | $0.10/hr |
 | Managed Nodegroup | 2x m5.large | ~$0.19/hr (varies by region) |
-| Karpenter Nodes | N x INSTANCE_TYPE (on-demand) | ~$0.15-0.20/hr each for xlarge (varies by region & instance type) |
+| Karpenter Nodes (standard) | N x m5.xlarge (on-demand) | ~$0.19/hr each |
+| Karpenter Nodes (low-spec) | N x t3.medium (on-demand) | ~$0.04/hr each |
 | NAT Gateway | 1x | ~$0.045/hr + data transfer |
 | ALB | 1x (if used) | ~$0.0225/hr + LCU |
 
-**Minimum cost (idle with 2 warm pool pods)**: ~$0.60-0.75/hr (~$15-18/day), varies by region.
+**Minimum cost (idle with 2 warm pool pods)**:
+- Standard (m5.xlarge): ~$0.72/hr (~$17/day)
+- Low-spec (t3.medium): ~$0.42/hr (~$10/day)
 
 Scale to 0 warm pool pods when not in use to reduce cost to ~$0.34/hr. Check [AWS Pricing](https://aws.amazon.com/ec2/pricing/on-demand/) for exact rates in your region.
