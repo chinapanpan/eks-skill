@@ -25,7 +25,7 @@ The deployment is fully automated via a Claude Code skill and works in any AWS r
                |                                 |
      +---------+----------+           +----------+---------+
      | Managed Node Group |           |  Karpenter Nodes   |
-     |   (m5.large x2)    |           |  (xlarge, dynamic) |
+     |   (m5.large x2)    |           | (INSTANCE_TYPE x N)|
      |  system workloads   |           |  1 pod per node    |
      +--------------------+           +--------------------+
                                               |
@@ -81,11 +81,12 @@ All parameters can be customized. Defaults are shown below.
 | `KARPENTER_VERSION` | `1.9.0` | >= 1.6 for EKS 1.34 | Karpenter Helm chart version |
 | `AGENT_SANDBOX_VERSION` | `v0.2.1` | Valid release tag | Agent Sandbox release |
 | `WARM_POOL_REPLICAS` | `2` | >= 1 | Pre-provisioned sandbox pods |
-| `INSTANCE_SIZE` | `xlarge` | xlarge or larger | EC2 instance size for sandbox nodes |
+| `INSTANCE_TYPE` | `m5.xlarge` | Valid EC2 instance type | EC2 instance type for sandbox nodes |
 | `AVAILABILITY_ZONES` | Auto-detected | 3 AZs required | Auto-detected from region |
 
 ### Important Constraints
-- **INSTANCE_SIZE**: Do NOT use `large` (2 vCPU). DaemonSet overhead leaves insufficient resources. Use `xlarge` (4 vCPU, 16GB) minimum.
+- **INSTANCE_TYPE**: Do NOT use `large` class instances (2 vCPU). DaemonSet overhead leaves insufficient resources. Use `xlarge` (4 vCPU, 16GB) or larger. Examples: `m5.xlarge`, `c6i.xlarge`, `r5.2xlarge`.
+- **INSTANCE_TYPE vs SandboxTemplate resources**: The SandboxTemplate in Step 11 requests `cpu: 3500m` and `memory: 12Gi`, sized for instances with 4 vCPU / 16GB (e.g., `m5.xlarge`). If you use a memory-constrained type like `c5.xlarge` (4 vCPU / 8GB), you must reduce the memory request accordingly.
 - **AVAILABILITY_ZONES**: Auto-detected via `aws ec2 describe-availability-zones`. Different regions have different AZ naming (e.g., Tokyo: a/c/d, Oregon: a/b/c).
 
 ---
@@ -121,7 +122,7 @@ export K8S_VERSION="1.34"
 export AWS_PARTITION="aws"
 export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 export KARPENTER_NAMESPACE="kube-system"
-export INSTANCE_SIZE="xlarge"
+export INSTANCE_TYPE="m5.xlarge"
 export WARM_POOL_REPLICAS=2
 
 # Auto-detect AZs
@@ -247,7 +248,7 @@ helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
   --wait
 ```
 
-**Expected output**: `Release "karpenter" has been upgraded. Happy Helming!`
+**Expected output**: `Release "karpenter" does not exist. Installing it now.` followed by `STATUS: deployed`
 
 ### Step 7: Create NodePool & EC2NodeClass (~1 min)
 
@@ -280,15 +281,9 @@ spec:
         - key: karpenter.sh/capacity-type
           operator: In
           values: ["on-demand"]
-        - key: karpenter.k8s.aws/instance-category
+        - key: node.kubernetes.io/instance-type
           operator: In
-          values: ["c", "m", "r"]
-        - key: karpenter.k8s.aws/instance-generation
-          operator: Gte
-          values: ["5"]
-        - key: karpenter.k8s.aws/instance-size
-          operator: In
-          values: ["${INSTANCE_SIZE}"]
+          values: ["${INSTANCE_TYPE}"]
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
@@ -459,7 +454,7 @@ After deployment, verify these:
 
 ```bash
 # 1. All system pods healthy
-kubectl get pods -n kube-system | grep -E 'karpenter|alb|ebs'
+kubectl get pods -n kube-system | grep -E 'karpenter|load-balancer|ebs'
 
 # 2. Agent Sandbox controller running
 kubectl get pods -n agent-sandbox-system
@@ -582,7 +577,7 @@ eksctl delete cluster --name ${CLUSTER_NAME} --region ${AWS_DEFAULT_REGION}
 |-----------|----------|-----------------|
 | EKS Control Plane | - | $0.10/hr |
 | Managed Nodegroup | 2x m5.large | ~$0.19/hr (varies by region) |
-| Karpenter Nodes | Nx xlarge (on-demand) | ~$0.15-0.20/hr each (varies by region & instance family) |
+| Karpenter Nodes | N x INSTANCE_TYPE (on-demand) | ~$0.15-0.20/hr each for xlarge (varies by region & instance type) |
 | NAT Gateway | 1x | ~$0.045/hr + data transfer |
 | ALB | 1x (if used) | ~$0.0225/hr + LCU |
 
