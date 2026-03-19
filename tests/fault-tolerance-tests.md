@@ -2,6 +2,26 @@
 
 Tested on `t3.medium` (2 vCPU / 4GB), warm pool replicas=2, EKS 1.34, Agent Sandbox v0.2.1.
 
+## Key Conclusions
+
+1. **Warm pool is fully self-healing** — pod deletion (~5s), node failure (~56s), burst usage (~25s) all recover automatically.
+2. **Active Claims do NOT self-heal** — if the backing pod is lost (T5/T8), the Claim stays `Ready=False` (ReconcilerError) permanently. This is a design limitation of Agent Sandbox controller: Claim-to-Pod binding is one-time and irreversible. Application-layer retry (delete broken Claim + create new one) is required.
+3. **Ephemeral EBS data is lost with pod** — Generic Ephemeral Volumes tie PVC lifecycle to Pod. Pod deletion = PVC deletion = data permanently lost. Use S3 backups for critical data. `Sandbox.spec.volumeClaimTemplates` (which would retain PVC across pod recreations) is not yet supported in SandboxTemplate ([#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225)).
+4. **Node failure on claimed EBS sandbox is the worst case** (T8) — triple cascade: Claim broken + Pod lost + EBS data permanently deleted. Warm pool itself recovers, but the claimed sandbox is unrecoverable.
+
+| # | Test | Result | Recovery |
+|---|------|--------|----------|
+| T1 | Warm Pool Pod Deletion | **PASS** | ~5s auto-recovery |
+| T2 | EC2 Node Termination | **PASS** | ~56s new node |
+| T3 | Claim + Pool Backfill | **PASS** | ~10s backfill |
+| T4 | Pool Exhaustion (Cold Start) | **PASS** | ~45s cold start |
+| T5 | Claimed Pod Deletion | **WARN** | No auto-recovery |
+| T6 | Burst Claims + Release | **PASS** | ~25s stabilize |
+| T7 | EBS Volume Mount (5Gi) | **PASS** | ~55s with EBS |
+| T8 | Node Kill on Claimed EBS Sandbox | **FAIL** | Claim + data lost |
+
+---
+
 ## Prerequisites
 
 Cluster must be fully deployed per `setup_guide.md`. Verify before running:
