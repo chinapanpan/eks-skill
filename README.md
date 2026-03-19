@@ -147,11 +147,4 @@ Manual reproduction guide: [tests/fault-tolerance-tests.md](tests/fault-toleranc
 
 Covers: pod deletion recovery, node failure, claim lifecycle, pool exhaustion, burst scaling, EBS mount, and the worst-case node-kill-on-claimed-EBS scenario.
 
-## Cost Estimate
 
-| Profile | Idle cost (2 warm pool pods) | Daily |
-|---------|------------------------------|-------|
-| Standard (m5.xlarge) | ~$0.72/hr | ~$17/day |
-| Low-spec (t3.medium) | ~$0.42/hr | ~$10/day |
-
-Scale warm pool to 0 when not in use to reduce to ~$0.34/hr.
