@@ -471,6 +471,7 @@ Tested on `t3.medium` (2 vCPU / 4GB) with warm pool replicas=2.
 | T4 | Pool Exhaustion (Cold Start) | **PASS** | 2 warm claims instant, 3rd triggers cold start ~45s (new node) |
 | T5 | Claimed Pod Deletion | **WARN** | Claim enters `Ready=False`, does NOT auto-recover (see below) |
 | T6 | Burst Claims + Release | **PASS** | 6 claims created/released, pool stabilizes to 2/2 in ~25s |
+| T7 | EBS Volume Mount (5Gi) | **PASS** | Ephemeral gp3 EBS auto-provisioned, read/write OK, PVC auto-cleaned (see below) |
 
 ### T5: Critical Finding — Claimed Pod Failure
 
@@ -500,6 +501,91 @@ if not sandbox.is_ready():
     sandbox = client.claim(template_name="agent-template")
 ```
 
+### T7: EBS Volume Mount
+
+Tested mounting a 5Gi gp3 EBS volume per sandbox pod using generic ephemeral volumes.
+
+**Prerequisites**: gp3 StorageClass + EBS CSI Driver installed.
+
+```bash
+# Create gp3 StorageClass (if not exists)
+cat <<'EOF' | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+EOF
+```
+
+**SandboxTemplate with EBS** — uses `ephemeral` volume so each pod gets its own PVC automatically:
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: agent-template-ebs
+spec:
+  podTemplate:
+    spec:
+      tolerations:
+      - key: agent-sandbox
+        value: "true"
+        effect: NoSchedule
+      nodeSelector:
+        node-type: agent-sandbox
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                agents.x-k8s.io/sandbox-template: agent-template-ebs
+            topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        runAsNonRoot: true
+      containers:
+      - name: agent
+        image: busybox
+        command: ["/bin/sh", "-c", "echo 'Agent with EBS running'; sleep 36000"]
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        ephemeral:
+          volumeClaimTemplate:
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              storageClassName: gp3
+              resources:
+                requests:
+                  storage: 5Gi
+```
+
+**Test results**:
+- Warm pool pod with EBS ready in ~55s (includes node creation + EBS attach)
+- Claim binds in ~3s (from warm pool), EBS immediately readable/writable at `/data`
+- Each pod gets independent PVC (`<pod-name>-data`), isolated 5Gi filesystem
+- On claim delete: pod terminated → PVC/PV auto-deleted (ReclaimPolicy=Delete)
+- Warm pool backfills new pod with fresh EBS in ~35s
+
+**Note**: EBS volumes are AZ-bound. Pods with EBS can only schedule to nodes in the same AZ as their volume. With `WaitForFirstConsumer`, the volume is created in the node's AZ, so this works naturally with Karpenter.
+
 ### Resilience Summary
 
 | Component | Self-healing? | Recovery Time |
@@ -509,6 +595,7 @@ if not sandbox.is_ready():
 | Warm Pool (claims released) | Yes | ~25s |
 | Active Claim (pod lost) | **No** | Manual retry required |
 | Cold Start (pool exhausted) | Yes | ~45s |
+| EBS Warm Pool (backfill) | Yes | ~35s (includes EBS attach) |
 
 ---
 
