@@ -2,14 +2,68 @@
 
 Deploy production-ready EKS clusters with single-EC2-per-Pod isolation using Karpenter and Agent Sandbox warm pools.
 
+## Architecture
+
+### Infrastructure
+
+```
+                     +---------------------------+
+                     |     EKS Control Plane      |
+                     |       (EKS 1.34)           |
+                     +---------------------------+
+                                |
+               +----------------+----------------+
+               |                                 |
+     +---------+----------+           +----------+---------+
+     | Managed Node Group |           |  Karpenter Nodes   |
+     |   (m5.large x2)    |           | (INSTANCE_TYPE x N)|
+     |  system workloads   |           |  1 pod per node    |
+     +--------------------+           +--------------------+
+                                              |
+                                    +---------+---------+
+                                    |  Agent Sandbox    |
+                                    |  Warm Pool (N)    |
+                                    |                   |
+                                    | SandboxClaim -->  |
+                                    | instant pod bind  |
+                                    +-------------------+
+```
+
+### Agent Sandbox Workflow
+
+```mermaid
+flowchart TB
+    User[User]
+    Claim[SandboxClaim]
+    Template[SandboxTemplate]
+    Sandbox[Sandbox]
+    ClaimController[Claim Controller]
+    Controller[Sandbox Controller]
+    Pod[Sandbox Pod]
+    Runtime[Sandbox Runtime Environment]
+    WarmPool[SandboxWarmPool]
+
+    User -->|creates| Sandbox
+    User -->|creates| Claim
+    Claim -->|references| Template
+    Claim -->|reconciled by| ClaimController
+    ClaimController -->|creates| Sandbox
+    ClaimController -->|adopts pod from| WarmPool
+    Sandbox -->|reconciled by| Controller
+    Controller -->|creates Pod if needed| Pod
+    Pod --> Runtime
+    WarmPool -->|pre-warmed pods| Pod
+```
+
 ## Repository Structure
 
 ```
 eks-skill/
-├── setup_guide.md           # Step-by-step deployment guide (11 steps)
-├── sandbox_usage_guide.md   # Agent Sandbox usage guide (post-install)
+├── setup_guide.md                      # Step-by-step deployment guide (11 steps)
+├── sandbox_usage_guide.md              # Agent Sandbox usage, tests & API reference
 ├── tests/
-│   └── test-all.sh          # Validation test suite (15 tests)
+│   ├── test-all.sh                     # Validation test suite (15 tests)
+│   └── fault-tolerance-tests.md        # Fault tolerance tests (T1-T8) reproduction guide
 └── README.md
 ```
 
@@ -37,6 +91,28 @@ Both profiles verified: pods run successfully with 1 pod per dedicated node.
 - **Single-pod-per-node isolation**: Triple guarantee via node taint + pod anti-affinity + resource sizing
 - **Warm pool**: Pre-provisioned sandboxes for instant (~1-2s) claim vs ~90s cold start
 
+## Fault Tolerance Test Results
+
+8 tests covering warm pool resilience, claim lifecycle, and EBS data persistence.
+
+| # | Test | Result | Recovery |
+|---|------|--------|----------|
+| T1 | Warm Pool Pod Deletion | **PASS** | ~5s auto-recovery |
+| T2 | EC2 Node Termination | **PASS** | ~56s new node |
+| T3 | Claim + Pool Backfill | **PASS** | ~10s backfill |
+| T4 | Pool Exhaustion (Cold Start) | **PASS** | ~45s cold start |
+| T5 | Claimed Pod Deletion | **WARN** | No auto-recovery |
+| T6 | Burst Claims + Release | **PASS** | ~25s stabilize |
+| T7 | EBS Volume Mount (5Gi) | **PASS** | ~55s with EBS |
+| T8 | Node Kill on Claimed EBS Sandbox | **FAIL** | Claim + data lost |
+
+**Key findings**:
+- Warm pool is fully self-healing (T1/T2/T3/T6)
+- Active Claims do NOT self-heal after pod loss (T5/T8) — application-layer retry required
+- Ephemeral EBS data is lost with pod (T8) — use S3 backups for critical data; `volumeClaimTemplates` support pending ([#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225))
+
+Full reproduction scripts: [tests/fault-tolerance-tests.md](tests/fault-tolerance-tests.md)
+
 ## Quick Start
 
 1. Follow **[setup_guide.md](setup_guide.md)** for the full 11-step deployment
@@ -51,18 +127,25 @@ Both profiles verified: pods run successfully with 1 pod per dedicated node.
 ## Guides
 
 - **[Setup Guide](setup_guide.md)**: Prerequisites, parameters, step-by-step deployment, troubleshooting, cleanup, and cost estimates.
-- **[Sandbox Usage Guide](sandbox_usage_guide.md)**: Concepts, SandboxTemplate/WarmPool/Claim usage, monitoring, advanced use cases (custom images, multiple pools, burst scaling, Python SDK), and full API reference.
+- **[Sandbox Usage Guide](sandbox_usage_guide.md)**: Concepts, SandboxTemplate/WarmPool/Claim usage, monitoring, fault tolerance test results, advanced use cases, and full API reference.
 
-## Test Suite
+## Test Suites
+
+### Validation Tests (15 tests)
 
 ```bash
 TEST_REGION=<your-region> TEST_CLUSTER_NAME=<your-cluster> bash tests/test-all.sh
 ```
 
-15 tests in 3 groups:
 - **Karpenter** (5): scale-out, single-pod-per-node, private subnets, taints, scale-in
 - **ALB Controller** (4): deployment health, IngressClass, ALB provisioning, HTTP response
 - **Agent Sandbox** (6): controller health, warm pool ready, claim latency, backfill, burst claims, cleanup
+
+### Fault Tolerance Tests (T1-T8)
+
+Manual reproduction guide: [tests/fault-tolerance-tests.md](tests/fault-tolerance-tests.md)
+
+Covers: pod deletion recovery, node failure, claim lifecycle, pool exhaustion, burst scaling, EBS mount, and the worst-case node-kill-on-claimed-EBS scenario.
 
 ## Cost Estimate
 
