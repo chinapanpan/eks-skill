@@ -457,6 +457,61 @@ sandbox.release()
 
 ---
 
+## Fault Tolerance Test Results
+
+Tested on `t3.medium` (2 vCPU / 4GB) with warm pool replicas=2.
+
+### Summary
+
+| # | Test | Result | Details |
+|---|------|--------|---------|
+| T1 | Warm Pool Pod Deletion | **PASS** | Pod deleted → new pod auto-created in ~5s, pool restored to 2/2 |
+| T2 | EC2 Node Termination | **PASS** | Instance terminated → Karpenter provisions new node in ~56s, pool recovers |
+| T3 | Claim Consumes Pool + Backfill | **PASS** | Claim binds instantly, pool backfills new pod in ~10s |
+| T4 | Pool Exhaustion (Cold Start) | **PASS** | 2 warm claims instant, 3rd triggers cold start ~45s (new node) |
+| T5 | Claimed Pod Deletion | **WARN** | Claim enters `Ready=False`, does NOT auto-recover (see below) |
+| T6 | Burst Claims + Release | **PASS** | 6 claims created/released, pool stabilizes to 2/2 in ~25s |
+
+### T5: Critical Finding — Claimed Pod Failure
+
+When a pod backing an active SandboxClaim is deleted (simulating node failure or OOM kill):
+
+```
+status:
+  conditions:
+  - message: 'pod in annotation get failed: Pod "xxx" not found'
+    reason: ReconcilerError
+    status: "False"
+    type: Ready
+```
+
+**Behavior**: The Claim stays in `Ready=False` permanently. The Agent Sandbox controller does **not** recreate the pod or rebind the Claim.
+
+**Impact**: Application-layer retry logic is required. Callers should:
+1. Monitor Claim `.status.conditions[type=Ready]`
+2. If `Ready=False` with `ReconcilerError`, delete the broken Claim
+3. Create a new SandboxClaim to get a fresh sandbox from the pool
+
+```python
+# Example: health check and retry
+sandbox = client.claim(template_name="agent-template")
+if not sandbox.is_ready():
+    sandbox.release()
+    sandbox = client.claim(template_name="agent-template")
+```
+
+### Resilience Summary
+
+| Component | Self-healing? | Recovery Time |
+|-----------|--------------|---------------|
+| Warm Pool (pod lost) | Yes | ~5s |
+| Warm Pool (node lost) | Yes | ~60s |
+| Warm Pool (claims released) | Yes | ~25s |
+| Active Claim (pod lost) | **No** | Manual retry required |
+| Cold Start (pool exhausted) | Yes | ~45s |
+
+---
+
 ## API Reference
 
 ### SandboxTemplate
