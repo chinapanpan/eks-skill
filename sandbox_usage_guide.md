@@ -586,6 +586,21 @@ spec:
 
 **Note**: EBS volumes are AZ-bound. Pods with EBS can only schedule to nodes in the same AZ as their volume. With `WaitForFirstConsumer`, the volume is created in the node's AZ, so this works naturally with Karpenter.
 
+#### Ephemeral Volume vs volumeClaimTemplates — Data Persistence
+
+The approach above uses **Kubernetes Generic Ephemeral Volumes** (`spec.volumes[].ephemeral`). There are two ways to attach EBS to sandbox pods — they have fundamentally different data persistence behaviors:
+
+| | Generic Ephemeral Volume (used above) | Sandbox `volumeClaimTemplates` ([#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225)) |
+|---|---|---|
+| PVC lifecycle | **Tied to Pod** — Pod deleted = PVC deleted | **Tied to Sandbox** — Pod deleted, PVC retained |
+| Pod recreated | Data **lost** | Data **preserved** (same PVC re-attached) |
+| SandboxTemplate support | **Yes** (standard PodSpec) | **Not yet** (draft PR [#240](https://github.com/kubernetes-sigs/agent-sandbox/pull/240)) |
+| Analogy | Deployment + ephemeral | StatefulSet + volumeClaimTemplates |
+
+**Combined with T5 finding**: If a claimed pod is lost (node failure, OOM kill), not only does the Claim enter `Ready=False` without self-healing, but with ephemeral volumes the **EBS data is also permanently lost**. For stateful workloads that need data persistence across pod failures, `volumeClaimTemplates` support (issue #225) is required — currently not available in SandboxTemplate.
+
+**Recommendation**: Use ephemeral volumes only for scratch/cache data. For critical data, either back up to S3 periodically, or wait for `volumeClaimTemplates` support in a future Agent Sandbox release.
+
 ### Resilience Summary
 
 | Component | Self-healing? | Recovery Time |
