@@ -472,6 +472,7 @@ Tested on `t3.medium` (2 vCPU / 4GB) with warm pool replicas=2.
 | T5 | Claimed Pod Deletion | **WARN** | Claim enters `Ready=False`, does NOT auto-recover (see below) |
 | T6 | Burst Claims + Release | **PASS** | 6 claims created/released, pool stabilizes to 2/2 in ~25s |
 | T7 | EBS Volume Mount (5Gi) | **PASS** | Ephemeral gp3 EBS auto-provisioned, read/write OK, PVC auto-cleaned (see below) |
+| T8 | Node Kill on Claimed EBS Sandbox | **FAIL** | Triple cascade: Claim broken + Pod lost + EBS data permanently deleted (see below) |
 
 ### T5: Critical Finding — Claimed Pod Failure
 
@@ -597,9 +598,19 @@ The approach above uses **Kubernetes Generic Ephemeral Volumes** (`spec.volumes[
 | SandboxTemplate support | **Yes** (standard PodSpec) | **Not yet** (draft PR [#240](https://github.com/kubernetes-sigs/agent-sandbox/pull/240)) |
 | Analogy | Deployment + ephemeral | StatefulSet + volumeClaimTemplates |
 
-**Combined with T5 finding**: If a claimed pod is lost (node failure, OOM kill), not only does the Claim enter `Ready=False` without self-healing, but with ephemeral volumes the **EBS data is also permanently lost**. For stateful workloads that need data persistence across pod failures, `volumeClaimTemplates` support (issue #225) is required — currently not available in SandboxTemplate.
+**Combined with T5 finding (verified in T8)**: If a node running a claimed EBS sandbox is terminated, a triple failure cascade occurs:
 
-**Recommendation**: Use ephemeral volumes only for scratch/cache data. For critical data, either back up to S3 periodically, or wait for `volumeClaimTemplates` support in a future Agent Sandbox release.
+1. **Pod lost** → Claim enters `Ready=False` (ReconcilerError), no self-healing
+2. **PVC deleted** → Ephemeral volume lifecycle tied to pod, auto-deleted
+3. **EBS data permanently lost** → No recovery possible
+
+The warm pool itself recovers (new pod with fresh empty EBS), but the claimed sandbox and its data are unrecoverable.
+
+**Recommendations**:
+- Use ephemeral volumes only for scratch/cache data
+- Back up critical data to S3 periodically from within the sandbox
+- Design agent workloads to be idempotent and resumable from external checkpoints
+- For true data persistence, wait for `volumeClaimTemplates` support ([#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225))
 
 ### Resilience Summary
 
@@ -611,6 +622,7 @@ The approach above uses **Kubernetes Generic Ephemeral Volumes** (`spec.volumes[
 | Active Claim (pod lost) | **No** | Manual retry required |
 | Cold Start (pool exhausted) | Yes | ~45s |
 | EBS Warm Pool (backfill) | Yes | ~35s (includes EBS attach) |
+| Claimed EBS Sandbox (node lost) | **No** | Data lost, manual re-claim required |
 
 ---
 

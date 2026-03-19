@@ -549,6 +549,144 @@ This test uses **Generic Ephemeral Volumes** — PVC lifecycle is tied to the Po
 
 ---
 
+## T8: Node Termination on Claimed EBS Sandbox
+
+**Goal**: Verify the end-to-end impact when a node running an active claimed sandbox with EBS data is terminated. This is the "worst case" scenario combining T2 + T5 + T7.
+
+### Prerequisites
+
+Requires T7 setup (gp3 StorageClass + `agent-template-ebs` + `ebs-warm-pool`). If already cleaned up, re-create them first (see T7 Setup sections above).
+
+### Test: Claim, Write Data, Terminate Node
+
+```bash
+# Step 1: Claim from EBS warm pool
+cat <<'EOF' | kubectl apply -f -
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: t8-ebs-claim
+  namespace: default
+spec:
+  sandboxTemplateRef:
+    name: agent-template-ebs
+  lifecycle:
+    shutdownPolicy: Delete
+EOF
+sleep 5
+
+# Step 2: Find claimed pod and write critical data
+SELECTOR=$(kubectl get sandbox t8-ebs-claim -n default \
+  -o jsonpath='{.status.selector}')
+CLAIM_POD=$(kubectl get pods -n default -l "$SELECTOR" \
+  --no-headers -o custom-columns=':.metadata.name' | head -1)
+NODE_NAME=$(kubectl get pod "$CLAIM_POD" -n default -o jsonpath='{.spec.nodeName}')
+echo "Pod: $CLAIM_POD, Node: $NODE_NAME"
+
+kubectl exec "$CLAIM_POD" -n default -- sh -c \
+  "echo 'CRITICAL DATA: user session abc123' > /data/session.txt && \
+   echo 'model weights checksum: deadbeef' > /data/checkpoint.txt && \
+   cat /data/session.txt && cat /data/checkpoint.txt"
+
+# Record PVC
+echo "=== PVC before termination ==="
+kubectl get pvc -n default | grep "$CLAIM_POD"
+
+# Step 3: Terminate the node
+INSTANCE_ID=$(kubectl get node "$NODE_NAME" \
+  -o jsonpath='{.spec.providerID}' | sed 's|.*/||')
+echo "Terminating instance: $INSTANCE_ID"
+aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" \
+  --region ${AWS_DEFAULT_REGION} \
+  --query 'TerminatingInstances[0].CurrentState.Name' --output text
+```
+
+### Test: Monitor Claim, Pod, PVC, Data
+
+```bash
+# Step 4: Watch all resources
+for i in $(seq 1 30); do
+  CLAIM_READY=$(kubectl get sandboxclaim t8-ebs-claim -n default \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+  CLAIM_REASON=$(kubectl get sandboxclaim t8-ebs-claim -n default \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null)
+  POD_EXISTS=$(kubectl get pod "$CLAIM_POD" -n default \
+    --no-headers 2>/dev/null | wc -l)
+  PVC_EXISTS=$(kubectl get pvc "${CLAIM_POD}-data" -n default \
+    --no-headers 2>/dev/null | wc -l)
+  echo "  (${i}0s) claim=$CLAIM_READY/$CLAIM_REASON pod=$POD_EXISTS pvc=$PVC_EXISTS"
+
+  if [ "$CLAIM_REASON" = "ReconcilerError" ]; then
+    echo ""
+    echo "=== CLAIM BROKEN ==="
+    kubectl get sandboxclaim t8-ebs-claim -n default \
+      -o jsonpath='{.status.conditions[0].message}'
+    echo ""
+    echo ""
+    echo "=== PVC status ==="
+    kubectl get pvc -n default | grep "$CLAIM_POD" || echo "PVC DELETED"
+    echo ""
+    echo "=== Data verdict: LOST ==="
+    echo "Pod deleted + PVC deleted (ephemeral volume) = data permanently lost"
+    break
+  fi
+  sleep 5
+done
+```
+
+### Test: Verify Warm Pool Recovery (unrelated to claim)
+
+```bash
+# The warm pool itself should still recover
+for i in $(seq 1 24); do
+  READY=$(kubectl get sandboxwarmpools ebs-warm-pool -n default \
+    -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+  echo "  (${i}0s) ebs warmpool ready=$READY"
+  if [ "$READY" = "1" ]; then
+    echo "Warm pool recovered (new pod with fresh EBS)"
+    break
+  fi
+  sleep 5
+done
+```
+
+### Cleanup
+
+```bash
+kubectl delete sandboxclaim t8-ebs-claim -n default
+kubectl delete sandboxwarmpool ebs-warm-pool -n default
+kubectl delete sandboxtemplate agent-template-ebs -n default
+sleep 15
+kubectl delete pvc --all -n default 2>/dev/null
+```
+
+### Results Timeline
+
+```
+Time     | Claim          | Pod           | PVC/EBS       | Data
+---------|----------------|---------------|---------------|------------------
+t=0      | Ready=True     | Running       | Bound 5Gi     | session.txt OK
+t+40s    | Ready=True     | Terminating   | Disappearing  | Inaccessible
+t+50s    | Ready=False    | Deleted       | Deleted       | PERMANENTLY LOST
+         | ReconcilerError|               |               |
+```
+
+**Triple failure cascade**:
+1. **Node terminated** → EC2 instance gone
+2. **Pod lost** → Claim enters `Ready=False` (ReconcilerError), no self-healing (same as T5)
+3. **PVC deleted** → Ephemeral volume lifecycle tied to pod, PVC auto-deleted → **EBS data permanently lost**
+
+Meanwhile, the warm pool itself recovers fine — a new pod with a fresh (empty) EBS is created on a new node. But the **claimed sandbox and its data are unrecoverable**.
+
+### Mitigation Recommendations
+
+1. **Periodic backups**: Write critical data to S3 regularly, not just local EBS
+2. **Application-layer health check**: Monitor `SandboxClaim.status.conditions[type=Ready]`, re-claim on failure
+3. **Idempotent workloads**: Design agent tasks to be resumable from checkpoints stored externally
+4. **Future**: `volumeClaimTemplates` support ([#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225)) would decouple PVC from pod lifecycle, allowing EBS re-attach after pod recreation
+
+---
+
 ## Results Summary
 
 | # | Test | Result | Recovery Time |
@@ -560,9 +698,11 @@ This test uses **Generic Ephemeral Volumes** — PVC lifecycle is tied to the Po
 | T5 | Claimed Pod Deletion | **WARN** | No auto-recovery |
 | T6 | Burst Claims + Release | **PASS** | ~25s |
 | T7 | EBS Volume Mount | **PASS** | ~55s initial, ~35s backfill |
+| T8 | Node Kill on Claimed EBS Sandbox | **FAIL** | Claim broken + data lost |
 
 ### Key Findings
 
 1. **Warm pool is self-healing** — pod deletion, node failure, and burst usage all recover automatically.
 2. **Active Claims do NOT self-heal** — if the backing pod is lost, the Claim stays `Ready=False`. Application-layer retry (delete + re-claim) is required.
 3. **Ephemeral EBS data is NOT persistent** — pod deletion = data loss. Use only for scratch/cache data. For persistent data, back up to S3 or wait for `volumeClaimTemplates` support ([#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225)).
+4. **Node failure on claimed EBS sandbox is the worst case** (T8) — triple cascade: Claim broken + Pod lost + EBS data permanently deleted. Applications must implement external checkpointing and health-check retry logic.
